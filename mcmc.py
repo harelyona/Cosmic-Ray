@@ -14,9 +14,22 @@ np.random.seed(42)
 true_A, true_omega, true_phi = 5, 8, 0.9
 t = np.linspace(0, 10, 100)
 
-def model(t, A, omega, phi):
-    return A * np.sin(omega * t + phi)
+import numpy as np
 
+
+def model(t, A, B, p_short, p_long, phi1, phi2, alpha):
+    def get_raw_signal(time):
+        angle1 = 2 * np.pi * time / p_short + phi1
+        angle2 = 2 * np.pi * time / p_long + phi2
+        term1 = A * (1 + np.sin(angle1)) ** alpha
+        term2 = B * (1 + np.sin(angle2))
+
+        return term1 + term2
+
+    c = 1 - get_raw_signal(0)
+    return get_raw_signal(t) + c
+    
+    
 y_true = model(t, true_A, true_omega, true_phi)
 noise_sigma = 0.5
 y_obs = y_true + np.random.normal(0, noise_sigma, size=len(t))
@@ -74,40 +87,41 @@ def run_mcmc_annealing(start_theta, iterations, step_size, t, y):
     print(f"Acceptance Rate: {accepted/iterations:.2%}") # אינדיקציה חשובה!
     return chain
 
+if __name__ == "__main__":
 # --- 4. הרצה ---
-bad_start_guess = [1.0, 1.0, 0.0]
+    bad_start_guess = [1.0, 1.0, 0.0]
 
-chain = run_mcmc_annealing(bad_start_guess, ITERATIONS, STEP_SIZE, t, y_obs)
+    chain = run_mcmc_annealing(bad_start_guess, ITERATIONS, STEP_SIZE, t, y_obs)
 
-burn_in = int(ITERATIONS * BURN_IN_COEFF)
-clean_chain = chain[burn_in:]
+    burn_in = int(ITERATIONS * BURN_IN_COEFF)
+    clean_chain = chain[burn_in:]
 
-res_A = np.mean(clean_chain[:, 0])
-res_omega = np.mean(clean_chain[:, 1])
-res_phi = np.mean(clean_chain[:, 2])
+    res_A = np.mean(clean_chain[:, 0])
+    res_omega = np.mean(clean_chain[:, 1])
+    res_phi = np.mean(clean_chain[:, 2])
 
-print("-" * 30)
-print(f"True Params: A={true_A}, omega={true_omega}, phi={true_phi}")
-print(f"Results:     A={res_A:.3f}, omega={res_omega:.3f}, phi={res_phi:.3f}")
+    print("-" * 30)
+    print(f"True Params: A={true_A}, omega={true_omega}, phi={true_phi}")
+    print(f"Results:     A={res_A:.3f}, omega={res_omega:.3f}, phi={res_phi:.3f}")
 
-# --- 5. ויזואליזציה ---
-plt.figure(figsize=(12, 5))
+    # --- 5. ויזואליזציה ---
+    plt.figure(figsize=(12, 5))
 
-# גרף התאמה
-plt.subplot(1, 2, 1)
-plt.scatter(t, y_obs, label='Data', color='gray', alpha=0.5)
-plt.plot(t, y_true, 'k--', label='True')
-plt.plot(t, model(t, res_A, res_omega, res_phi), 'r-', label='Annealing Fit', lw=2)
-plt.title(f'Result (Step Size={STEP_SIZE})')
-plt.legend()
+    # גרף התאמה
+    plt.subplot(1, 2, 1)
+    plt.scatter(t, y_obs, label='Data', color='gray', alpha=0.5)
+    plt.plot(t, y_true, 'k--', label='True')
+    plt.plot(t, model(t, res_A, res_omega, res_phi), 'r-', label='Annealing Fit', lw=2)
+    plt.title(f'Result (Step Size={STEP_SIZE})')
+    plt.legend()
 
-# גרף Trace של אומגה - לראות איך הוא מצא את הדרך
-plt.subplot(1, 2, 2)
-plt.plot(chain[:, 1], color='green', alpha=0.6)
-plt.axhline(true_omega, color='black', linestyle='--')
-plt.title('Omega Trace (Search Process)')
-plt.xlabel('Iterations')
-plt.ylabel('Omega')
+    # גרף Trace של אומגה - לראות איך הוא מצא את הדרך
+    plt.subplot(1, 2, 2)
+    plt.plot(chain[:, 1], color='green', alpha=0.6)
+    plt.axhline(true_omega, color='black', linestyle='--')
+    plt.title('Omega Trace (Search Process)')
+    plt.xlabel('Iterations')
+    plt.ylabel('Omega')
 
-plt.tight_layout()
-plt.show()
+    plt.tight_layout()
+    plt.show()
