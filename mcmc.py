@@ -1,10 +1,11 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import sympy as sp
 
 # --- קבועים ---
-ITERATIONS = 40000       # הגדלתי מעט ליתר ביטחון
-STEP_SIZE = 0.5          # <--- השינוי הקריטי: צעד גדול יותר לסריקה מהירה
-BURN_IN_COEFF = 0.6      # זורקים את ה-60% הראשונים (שהיו חמים מדי)
+ITERATIONS = 40000
+STEP_SIZE = 0.5
+BURN_IN_COEFF = 0.6
 INITIAL_TEMP = 5000.0
 COOLING_RATE = 0.9997
 MIN_TEMP = 0.5
@@ -14,30 +15,70 @@ np.random.seed(42)
 true_A, true_omega, true_phi = 5, 8, 0.9
 t = np.linspace(0, 10, 100)
 
-import numpy as np
+t, A, B, p_short, p_long, phi1, phi2, alpha = sp.symbols('t A B p_short p_long phi1 phi2 alpha')
 
 
-def model(t, A, B, p_short, p_long, phi1, phi2, alpha):
-    def get_raw_signal(time):
-        angle1 = 2 * np.pi * time / p_short + phi1
-        angle2 = 2 * np.pi * time / p_long + phi2
-        term1 = A * (1 + np.sin(angle1)) ** alpha
-        term2 = B * (1 + np.sin(angle2))
+def _get_symbolic_expr():
+    """
+    Internal helper: Defines the math ONE time.
+    Both the model and derivative functions will build off this.
+    """
+    # Define the raw signal terms
+    angle1 = 2 * sp.pi * t / p_short + phi1
+    angle2 = 2 * sp.pi * t / p_long + phi2
 
-        return term1 + term2
+    term1 = A * (1 + sp.sin(angle1)) ** alpha
+    term2 = B * (1 + sp.sin(angle2))
 
-    c = 1 - get_raw_signal(0)
-    return get_raw_signal(t) + c
-    
-    
-y_true = model(t, true_A, true_omega, true_phi)
-noise_sigma = 0.5
-y_obs = y_true + np.random.normal(0, noise_sigma, size=len(t))
+    raw_signal_t = term1 + term2
+
+    # Calculate the constant 'c' symbolically (at t=0)
+    raw_signal_0 = raw_signal_t.subs(t, 0)
+    c = 1 - raw_signal_0
+
+    # Return the full corrected expression
+    return raw_signal_t + c
+
+
+def model():
+    """
+    Returns a NumPy-ready function for the MODEL.
+    Signature: func(t, A, B, p_short, p_long, phi1, phi2, alpha)
+    """
+    expr = _get_symbolic_expr()
+
+    # Create the function
+    func = sp.lambdify(
+        (t, A, B, p_short, p_long, phi1, phi2, alpha),
+        expr,
+        modules='numpy'
+    )
+    return func
+
+
+def derivative():
+    """
+    Returns a NumPy-ready function for the DERIVATIVE (dy/dt).
+    Signature: func(t, A, B, p_short, p_long, phi1, phi2, alpha)
+    """
+    expr = _get_symbolic_expr()
+
+    # Calculate derivative symbolically
+    deriv_expr = sp.diff(expr, t)
+
+    # Create the function
+    func = sp.lambdify(
+        (t, A, B, p_short, p_long, phi1, phi2, alpha),
+        deriv_expr,
+        modules='numpy'
+    )
+    return func
+
 
 # --- 2. Likelihood & Prior ---
 def log_likelihood(theta, t, y):
-    A, omega, phi = theta
-    y_model = model(t, A, omega, phi)
+    a = model()
+    y_model = a(t, *theta)
     sse = np.sum((y - y_model) ** 2)
     return -0.5 * sse / (noise_sigma ** 2)
 
@@ -86,6 +127,10 @@ def run_mcmc_annealing(start_theta, iterations, step_size, t, y):
     print(f"Final Temp: {current_temp:.2f}")
     print(f"Acceptance Rate: {accepted/iterations:.2%}") # אינדיקציה חשובה!
     return chain
+e = model()
+y_true = e(t, true_A, true_omega, true_phi, 1, 0, 0, 0)
+noise_sigma = 0.5
+y_obs = y_true + np.random.normal(0, noise_sigma, size=len(t))
 
 if __name__ == "__main__":
 # --- 4. הרצה ---
