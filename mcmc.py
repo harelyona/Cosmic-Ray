@@ -1,172 +1,207 @@
-import numpy as np
-import matplotlib.pyplot as plt
-import sympy as sp
+from typing import List, Callable, Sequence
 
-# --- קבועים ---
+import numpy as np
+import sympy as sp
+from matplotlib import pyplot as plt
+from scipy import integrate
+from scipy.optimize import fsolve
+from scipy.stats import gaussian_kde
+
+worked_time = 11
+# --- CONSTANTS ---
 ITERATIONS = 40000
 STEP_SIZE = 0.5
 BURN_IN_COEFF = 0.6
 INITIAL_TEMP = 5000.0
 COOLING_RATE = 0.9997
 MIN_TEMP = 0.5
+POTASSIUM_40_HALF_TIME = 1
 
-# --- 1. יצירת הדאטה ---
-np.random.seed(42)
-true_A, true_omega, true_phi = 5, 8, 0.9
-t = np.linspace(0, 10, 100)
-
-t, A, B, p_short, p_long, phi1, phi2, alpha = sp.symbols('t A B p_short p_long phi1 phi2 alpha')
+# --- 1. DEFINE SYMBOLS GLOBALLY ---
+# We use specific names so they don't clash with data variables later
+t_sym, A, B, p_short, p_long, phi1, phi2, alpha = sp.symbols('t A B p_short p_long phi1 phi2 alpha')
 
 
 def _get_symbolic_expr():
     """
-    Internal helper: Defines the math ONE time.
-    Both the model and derivative functions will build off this.
+    Internal helper: Defines the math ONE time using symbols.
     """
-    # Define the raw signal terms
-    angle1 = 2 * sp.pi * t / p_short + phi1
-    angle2 = 2 * sp.pi * t / p_long + phi2
+    # Use t_sym (symbol), NOT t_values (array)
+    angle1 = 2 * sp.pi * t_sym / p_short + phi1
+    angle2 = 2 * sp.pi * t_sym / p_long + phi2
 
     term1 = A * (1 + sp.sin(angle1)) ** alpha
     term2 = B * (1 + sp.sin(angle2))
 
     raw_signal_t = term1 + term2
 
-    # Calculate the constant 'c' symbolically (at t=0)
-    raw_signal_0 = raw_signal_t.subs(t, 0)
+    # Calculate constant 'c' at t=0
+    raw_signal_0 = raw_signal_t.subs(t_sym, 0)
     c = 1 - raw_signal_0
 
-    # Return the full corrected expression
     return raw_signal_t + c
 
 
-def model():
-    """
-    Returns a NumPy-ready function for the MODEL.
-    Signature: func(t, A, B, p_short, p_long, phi1, phi2, alpha)
-    """
+def get_crf_model():
+    """Returns the Flux Model Function (NumPy ready)"""
     expr = _get_symbolic_expr()
-
-    # Create the function
     func = sp.lambdify(
-        (t, A, B, p_short, p_long, phi1, phi2, alpha),
+        (t_sym, A, B, p_short, p_long, phi1, phi2, alpha),
         expr,
         modules='numpy'
     )
     return func
 
 
-def derivative():
-    """
-    Returns a NumPy-ready function for the DERIVATIVE (dy/dt).
-    Signature: func(t, A, B, p_short, p_long, phi1, phi2, alpha)
-    """
+def get_derivative_model():
+    """Returns the Derivative Function dPhi/dt (NumPy ready)"""
     expr = _get_symbolic_expr()
-
-    # Calculate derivative symbolically
-    deriv_expr = sp.diff(expr, t)
-
-    # Create the function
+    deriv_expr = sp.diff(expr, t_sym)  # Differentiate with respect to symbol t_sym
     func = sp.lambdify(
-        (t, A, B, p_short, p_long, phi1, phi2, alpha),
+        (t_sym, A, B, p_short, p_long, phi1, phi2, alpha),
         deriv_expr,
         modules='numpy'
     )
     return func
 
 
-# --- 2. Likelihood & Prior ---
-def log_likelihood(theta, t, y):
-    a = model()
-    y_model = a(t, *theta)
+# --- 2. LOGIC FUNCTIONS ---
+
+def calc_ratios(time_values: np.ndarray, crf_function, crf_function_parameters) -> np.ndarray:
+    """
+    Calculates the ratio N40 / N41 for varying exposure ages.
+    Assumes time_values are Lookback Time (0 = Today, 100 = 100 Ma ago).
+    """
+    flux = crf_function(time_values, *crf_function_parameters)
+    decay_weight = np.exp(-time_values/POTASSIUM_40_HALF_TIME)
+    n_40 = integrate.cumulative_trapezoid(flux * decay_weight, time_values, initial=0)
+    n_41 = integrate.cumulative_trapezoid(flux, time_values, initial=0)
+    ratio = np.zeros_like(n_40)
+    mask = n_41 > 0
+    ratio[mask] = n_40[mask] / n_41[mask]
+
+    return ratio
+
+
+def calc_exposure_age(t_values:np.ndarray, crf_function: Callable, crf_function_parameters:Sequence[float]) -> np.ndarray:
+    """
+    Solves for t using fsolve.
+    Equation: ratio * t = tau * (1 - exp(-t/tau))
+    """
+    ratios = calc_ratios(t_values, crf_function, crf_function_parameters)
+    exposure_ages = np.zeros_like(t_values)
+    for i, ratio in enumerate(ratios):
+        equation_to_solve = lambda t: ratio * t - POTASSIUM_40_HALF_TIME * (1 - np.exp(-t / POTASSIUM_40_HALF_TIME))
+        exposure_ages[i] = fsolve(equation_to_solve, POTASSIUM_40_HALF_TIME)[0]
+    return exposure_ages
+
+
+def create_and_plot_pdf(exposure_ages: np.ndarray):
+    """
+    Creates a Probability Density Function (PDF) from exposure ages using KDE
+    and plots the result.
+    """
+    # 1. Remove NaNs or Infs if the solver failed for some points
+    valid_ages = exposure_ages[np.isfinite(exposure_ages)]
+    # 2. Create the Kernel Density Estimator (KDE)
+    # This object represents the PDF function
+    kde = gaussian_kde(valid_ages)
+
+    # 3. Define the X-axis grid (the range of ages we want to look at)
+    # We go slightly below min and above max to see the tails of the curve
+    x_grid = np.linspace(min(valid_ages) - 10, max(valid_ages) + 10, 500)
+
+    # 4. Calculate the PDF values (Y-axis)
+    pdf_values = kde(x_grid)
+
+    # --- PLOTTING ---
+    plt.figure(figsize=(10, 6))
+
+    # A. Plot the Smooth PDF line
+    plt.plot(x_grid, pdf_values, color='red', label='KDE (Smooth PDF)', linewidth=2)
+
+    # B. Plot a Histogram behind it (for verification)
+    # density=True ensures the histogram is normalized so it matches the PDF height
+    plt.hist(valid_ages, bins=30, density=True, alpha=0.3, color='blue', label='Histogram')
+
+    plt.title("Probability Density Function of Exposure Ages")
+    plt.xlabel("Exposure Age (Ma)")
+    plt.ylabel("Probability Density")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.show()
+
+    return x_grid, pdf_values
+
+
+def log_likelihood(model_func, theta, t, y):
+    # Calculate model predictions
+    y_model = model_func(t, *theta)
+    # Simple Sum of Squared Errors
     sse = np.sum((y - y_model) ** 2)
-    return -0.5 * sse / (noise_sigma ** 2)
+    return -0.5 * sse
+
 
 def log_prior(theta):
-    A, omega, phi = theta
-    # וידוא שהתשובה (8) נמצאת בתוך הטווח
-    if 0 < A < 10 and 0 < omega < 12 and -np.pi < phi < np.pi:
+    A_val, B_val, p_s, p_l, ph1, ph2, al = theta
+    # Basic bounds check
+    if 0 < A_val < 20 and 0 < B_val < 20:
         return 0.0
     return -np.inf
 
-def log_posterior(theta, t, y):
+
+def log_posterior(model_func, theta, t, y):
     lp = log_prior(theta)
     if not np.isfinite(lp):
         return -np.inf
-    return lp + log_likelihood(theta, t, y)
+    return lp + log_likelihood(model_func, theta, t, y)
 
-# --- 3. MCMC Annealing ---
-def run_mcmc_annealing(start_theta, iterations, step_size, t, y):
-    chain = np.zeros((iterations, 3))
+
+def run_mcmc_annealing(model_func, start_theta, iterations, step_size, t, y):
+    # Initialize chain
+    n_params = len(start_theta)
+    chain = np.zeros((iterations, n_params))
     chain[0] = start_theta
-    current_log_prob = log_posterior(start_theta, t, y)
 
+    current_log_prob = log_posterior(model_func, start_theta, t, y)
     current_temp = INITIAL_TEMP
-    accepted = 0
 
     for i in range(1, iterations):
-        current_theta = chain[i - 1]
-        proposal = current_theta + np.random.normal(0, step_size, 3)
+        # Propose new state
+        proposal = chain[i - 1] + np.random.normal(0, step_size, n_params)
 
-        proposal_log_prob = log_posterior(proposal, t, y)
+        # Calculate probabilities
+        proposal_log_prob = log_posterior(model_func, proposal, t, y)
         diff = proposal_log_prob - current_log_prob
 
-        # Annealing Logic
-        adjusted_diff = diff / current_temp
-
-        if np.log(np.random.rand()) < adjusted_diff:
+        # Annealing acceptance logic
+        if diff > 0 or np.log(np.random.rand()) < (diff / current_temp):
             chain[i] = proposal
             current_log_prob = proposal_log_prob
-            accepted += 1
         else:
-            chain[i] = current_theta
+            chain[i] = chain[i - 1]
 
+        # Cool down
         current_temp = max(current_temp * COOLING_RATE, MIN_TEMP)
 
-    print(f"Annealing Finished.")
-    print(f"Final Temp: {current_temp:.2f}")
-    print(f"Acceptance Rate: {accepted/iterations:.2%}") # אינדיקציה חשובה!
-    return chain
-e = model()
-y_true = e(t, true_A, true_omega, true_phi, 1, 0, 0, 0)
-noise_sigma = 0.5
-y_obs = y_true + np.random.normal(0, noise_sigma, size=len(t))
+    burn_in = int(iterations * BURN_IN_COEFF)
+    return np.mean(chain[burn_in:], axis=0)
 
+
+# --- 3. MAIN EXECUTION ---
 if __name__ == "__main__":
-# --- 4. הרצה ---
-    bad_start_guess = [1.0, 1.0, 0.0]
+    # 1. Setup Time Array
+    t_values = np.linspace(0, 200, 50)
+    initial_crf_parameters = [0, 0, 100, 100, 0, 0, 1]
 
-    chain = run_mcmc_annealing(bad_start_guess, ITERATIONS, STEP_SIZE, t, y_obs)
+    # 2. Generate the model function ONCE
+    # This creates the actual function that accepts (t, A, B...)
+    model_func = get_crf_model()
 
-    burn_in = int(ITERATIONS * BURN_IN_COEFF)
-    clean_chain = chain[burn_in:]
+    # 3. Pass 'model_func' (the result), NOT 'get_crf_model' (the factory)
+    # The error occurred here because you passed the wrong function object
+    ea = calc_exposure_age(t_values, model_func, initial_crf_parameters)
 
-    res_A = np.mean(clean_chain[:, 0])
-    res_omega = np.mean(clean_chain[:, 1])
-    res_phi = np.mean(clean_chain[:, 2])
+    # 4. Plot
+    create_and_plot_pdf(ea)
 
-    print("-" * 30)
-    print(f"True Params: A={true_A}, omega={true_omega}, phi={true_phi}")
-    print(f"Results:     A={res_A:.3f}, omega={res_omega:.3f}, phi={res_phi:.3f}")
-
-    # --- 5. ויזואליזציה ---
-    plt.figure(figsize=(12, 5))
-
-    # גרף התאמה
-    plt.subplot(1, 2, 1)
-    plt.scatter(t, y_obs, label='Data', color='gray', alpha=0.5)
-    plt.plot(t, y_true, 'k--', label='True')
-    plt.plot(t, model(t, res_A, res_omega, res_phi), 'r-', label='Annealing Fit', lw=2)
-    plt.title(f'Result (Step Size={STEP_SIZE})')
-    plt.legend()
-
-    # גרף Trace של אומגה - לראות איך הוא מצא את הדרך
-    plt.subplot(1, 2, 2)
-    plt.plot(chain[:, 1], color='green', alpha=0.6)
-    plt.axhline(true_omega, color='black', linestyle='--')
-    plt.title('Omega Trace (Search Process)')
-    plt.xlabel('Iterations')
-    plt.ylabel('Omega')
-
-    plt.tight_layout()
-    plt.show()
